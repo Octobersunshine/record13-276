@@ -179,6 +179,132 @@ def example_7_keep_index():
     print()
 
 
+def example_8_mixed_numeric_sort():
+    """示例8: 混合数值类型排序修复"""
+    print("=" * 60)
+    print("示例8: 数字与字符串数字混合排序（自动类型转换）")
+    print("=" * 60)
+
+    data = {
+        'name': ['A', 'B', 'C', 'D', 'E'],
+        'mixed_num': [10, '5', 20, '15', 3]
+    }
+    df = pd.DataFrame(data)
+    print("原始数据（数字和字符串数字混合）:")
+    print(df)
+    print(f"mixed_num 列类型: {df['mixed_num'].dtype}")
+    print("\n" + "-" * 60)
+
+    sorter = MultiColumnSorter()
+    result = sorter.sort(df, sort_columns='mixed_num', ascending=True)
+    print("自动转换类型后的升序排序结果:")
+    print(result)
+    print("类型转换信息:", sorter.get_last_conversions())
+    print()
+
+    print("-" * 60)
+    print("关闭自动转换（会报错）:")
+    try:
+        sorter_no_convert = MultiColumnSorter(auto_convert_types=False)
+        result_no = sorter_no_convert.sort(df, sort_columns='mixed_num', ascending=True)
+        print(result_no)
+    except TypeError as e:
+        print(f"TypeError: {e}")
+    print()
+
+
+def example_9_mixed_datetime_sort():
+    """示例9: 混合日期类型排序修复"""
+    print("=" * 60)
+    print("示例9: Timestamp与字符串日期混合排序（自动类型转换）")
+    print("=" * 60)
+
+    data = {
+        'name': ['A', 'B', 'C', 'D'],
+        'mixed_date': [
+            pd.Timestamp('2023-01-15'),
+            '2022-06-30',
+            pd.Timestamp('2024-03-20'),
+            '2023-09-01'
+        ]
+    }
+    df = pd.DataFrame(data)
+    print("原始数据（Timestamp和字符串日期混合）:")
+    print(df)
+    print(f"mixed_date 列类型: {df['mixed_date'].dtype}")
+    print("\n" + "-" * 60)
+
+    sorter = MultiColumnSorter()
+    result = sorter.sort(df, sort_columns='mixed_date', ascending=True)
+    print("自动转换类型后的升序排序结果:")
+    print(result)
+    print("类型转换信息:", sorter.get_last_conversions())
+    print()
+
+
+def example_10_multi_column_mixed_sort():
+    """示例10: 多列混合类型排序"""
+    print("=" * 60)
+    print("示例10: 多列混合类型排序")
+    print("=" * 60)
+
+    data = {
+        'category': ['X', 'Y', 'X', 'Y', 'X'],
+        'mixed_num': ['100', 50, 200, '80', 150],
+        'mixed_date': [
+            '2023-05-01',
+            pd.Timestamp('2022-12-15'),
+            '2024-01-10',
+            pd.Timestamp('2023-08-20'),
+            '2023-02-28'
+        ],
+        'value': [1, 2, 3, 4, 5]
+    }
+    df = pd.DataFrame(data)
+    print("原始数据:")
+    print(df)
+    print("\n" + "-" * 60)
+
+    sorter = MultiColumnSorter()
+    result = sorter.sort(
+        df,
+        sort_columns=['category', 'mixed_num', 'mixed_date'],
+        ascending=[True, True, False]
+    )
+    print("按 category升序、mixed_num升序、mixed_date降序 排序结果:")
+    print(result)
+    print("类型转换信息:", sorter.get_last_conversions())
+    print()
+
+
+def example_11_string_numeric_lexicographic_fix():
+    """示例11: 字符串数字词典序问题修复"""
+    print("=" * 60)
+    print("示例11: 字符串数字词典序问题修复")
+    print("=" * 60)
+
+    data = {
+        'code': ['10', '2', '100', '15', '3', '20']
+    }
+    df = pd.DataFrame(data)
+    print("原始数据（纯字符串数字）:")
+    print(df)
+    print(f"code 列类型: {df['code'].dtype}")
+    print("\n" + "-" * 60)
+
+    result_naive = df.sort_values('code')
+    print("Pandas 默认排序（词典序，错误）:")
+    print(result_naive)
+    print()
+
+    sorter = MultiColumnSorter()
+    result_fixed = sorter.sort(df, sort_columns='code', ascending=True)
+    print("自动转换后的正确排序（数值序）:")
+    print(result_fixed)
+    print("类型转换信息:", sorter.get_last_conversions())
+    print()
+
+
 def main():
     """运行所有示例"""
     example_1_basic_sort()
@@ -188,6 +314,10 @@ def main():
     example_5_na_position()
     example_6_convenience_function()
     example_7_keep_index()
+    example_8_mixed_numeric_sort()
+    example_9_mixed_datetime_sort()
+    example_10_multi_column_mixed_sort()
+    example_11_string_numeric_lexicographic_fix()
 
 
 if __name__ == "__main__":

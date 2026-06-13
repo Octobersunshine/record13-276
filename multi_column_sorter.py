@@ -1,4 +1,6 @@
+import warnings
 import pandas as pd
+import numpy as np
 from typing import List, Tuple, Union, Optional, Dict, Any
 
 
@@ -7,21 +9,25 @@ class MultiColumnSorter:
     基于 Pandas 的多列排序服务类。
 
     支持按指定列和顺序（升序/降序）对 DataFrame 进行排序，
-    同时提供数据验证、缺失值处理等辅助功能。
+    同时提供数据验证、缺失值处理、混合类型自动转换等辅助功能。
     """
 
-    def __init__(self, na_position: str = 'last'):
+    def __init__(self, na_position: str = 'last', auto_convert_types: bool = True):
         """
         初始化排序器。
 
         Args:
             na_position: 缺失值的位置，'last'（默认）或 'first'
+            auto_convert_types: 是否自动转换混合数据类型列（默认 True），
+                               自动将 object 列尝试转换为数值或日期类型
         """
         if na_position not in ['first', 'last']:
             raise ValueError("na_position 必须是 'first' 或 'last'")
         self.na_position = na_position
+        self.auto_convert_types = auto_convert_types
         self.last_sort_columns: List[str] = []
         self.last_sort_orders: List[bool] = []
+        self.last_conversions: Dict[str, str] = {}
 
     def sort(
         self,
@@ -52,6 +58,37 @@ class MultiColumnSorter:
 
         self.last_sort_columns = sort_columns
         self.last_sort_orders = ascending
+        self.last_conversions = {}
+
+        if self.auto_convert_types:
+            converted_map, temp_columns = self._auto_convert_columns(df, sort_columns)
+            self.last_conversions = converted_map
+
+            if temp_columns:
+                sort_key_columns = [
+                    temp_columns[col] if col in temp_columns else col
+                    for col in sort_columns
+                ]
+                temp_df = df.copy()
+                for col, temp_col in temp_columns.items():
+                    temp_df[temp_col] = converted_map[col + '__values']
+
+                result = temp_df.sort_values(
+                    by=sort_key_columns,
+                    ascending=ascending,
+                    na_position=self.na_position,
+                    ignore_index=ignore_index,
+                    inplace=False
+                )
+
+                result = result.drop(columns=list(temp_columns.values()))
+
+                if inplace:
+                    df.drop(df.index, inplace=True)
+                    df[result.columns] = result
+                    return None
+
+                return result
 
         result = df.sort_values(
             by=sort_columns,
@@ -127,19 +164,37 @@ class MultiColumnSorter:
         sort_columns, ascending = self._validate_params(df, sort_columns, ascending)
         self.last_sort_columns = sort_columns
         self.last_sort_orders = ascending
+        self.last_conversions = {}
 
         if key is None:
             return self.sort(df, sort_columns, ascending, ignore_index, inplace)
 
         temp_df = df.copy()
+        all_temp_cols: List[str] = []
+
         for col, func in key.items():
             if col in sort_columns:
-                temp_df[f'__key_{col}'] = temp_df[col].apply(func)
+                temp_col = f'__key_{col}'
+                temp_df[temp_col] = temp_df[col].apply(func)
+                all_temp_cols.append(temp_col)
 
-        key_columns = [
-            f'__key_{col}' if col in key else col
-            for col in sort_columns
-        ]
+        auto_converted_map: Dict[str, Any] = {}
+        auto_temp_columns: Dict[str, str] = {}
+        if self.auto_convert_types:
+            auto_converted_map, auto_temp_columns = self._auto_convert_columns(df, sort_columns)
+            self.last_conversions = auto_converted_map
+            for col, temp_col in auto_temp_columns.items():
+                temp_df[temp_col] = auto_converted_map[col + '__values']
+                all_temp_cols.append(temp_col)
+
+        key_columns = []
+        for col in sort_columns:
+            if col in key:
+                key_columns.append(f'__key_{col}')
+            elif col in auto_temp_columns:
+                key_columns.append(auto_temp_columns[col])
+            else:
+                key_columns.append(col)
 
         result = temp_df.sort_values(
             by=key_columns,
@@ -149,7 +204,7 @@ class MultiColumnSorter:
             inplace=False
         )
 
-        result = result.drop(columns=[c for c in result.columns if c.startswith('__key_')])
+        result = result.drop(columns=all_temp_cols)
 
         if inplace:
             df.drop(df.index, inplace=True)
@@ -166,6 +221,152 @@ class MultiColumnSorter:
             (排序列名列表, 排序顺序列表)
         """
         return self.last_sort_columns, self.last_sort_orders
+
+    def get_last_conversions(self) -> Dict[str, str]:
+        """
+        获取上一次排序中各列的类型转换信息。
+
+        Returns:
+            字典，键为列名，值为转换后的目标类型（如 'numeric', 'datetime'），
+            未转换的列不在返回结果中
+        """
+        return {k: v for k, v in self.last_conversions.items() if not k.endswith('__values')}
+
+    def _auto_convert_columns(
+        self,
+        df: pd.DataFrame,
+        sort_columns: List[str]
+    ) -> Tuple[Dict[str, Any], Dict[str, str]]:
+        """
+        自动检测并转换排序列的数据类型。
+
+        对 object 类型的列，优先尝试转换为数值类型，其次尝试转换为日期类型。
+        转换结果通过临时列保存，不修改原始数据。
+
+        Args:
+            df: 待排序的 DataFrame
+            sort_columns: 排序列名列表
+
+        Returns:
+            (转换信息字典, 列名到临时列名的映射字典)
+            转换信息字典包含类型名称和转换后的值数组
+        """
+        converted_map: Dict[str, Any] = {}
+        temp_columns: Dict[str, str] = {}
+
+        for col in sort_columns:
+            series = df[col]
+            dtype_str = str(series.dtype).lower()
+
+            if dtype_str not in ('object', 'string', 'str'):
+                continue
+
+            non_null = series.dropna()
+            if non_null.empty:
+                continue
+
+            converted, target_type = self._try_convert_series(series)
+            if converted is not None and target_type is not None:
+                temp_col_name = f'__auto_convert_{col}'
+                temp_columns[col] = temp_col_name
+                converted_map[col] = target_type
+                converted_map[col + '__values'] = converted
+
+        return converted_map, temp_columns
+
+    def _try_convert_series(self, series: pd.Series) -> Tuple[Optional[pd.Series], Optional[str]]:
+        """
+        尝试转换 Series 的数据类型。
+
+        转换优先级：数值 > 日期
+        只有当非空值的转换成功率 >= 80% 时才认为转换有效。
+
+        Args:
+            series: 待转换的 Series
+
+        Returns:
+            (转换后的 Series, 目标类型名称)，转换失败时返回 (None, None)
+        """
+        non_null_mask = series.notna()
+        non_null_count = non_null_mask.sum()
+
+        if non_null_count == 0:
+            return None, None
+
+        min_success_ratio = 0.8
+
+        numeric_converted = self._try_convert_numeric(series, non_null_mask)
+        if numeric_converted is not None:
+            success_count = numeric_converted[non_null_mask].notna().sum()
+            if success_count / non_null_count >= min_success_ratio:
+                return numeric_converted, 'numeric'
+
+        datetime_converted = self._try_convert_datetime(series, non_null_mask)
+        if datetime_converted is not None:
+            success_count = datetime_converted[non_null_mask].notna().sum()
+            if success_count / non_null_count >= min_success_ratio:
+                return datetime_converted, 'datetime'
+
+        return None, None
+
+    def _try_convert_numeric(
+        self,
+        series: pd.Series,
+        non_null_mask: pd.Series
+    ) -> Optional[pd.Series]:
+        """
+        尝试将 Series 转换为数值类型。
+
+        Args:
+            series: 待转换的 Series
+            non_null_mask: 非空值掩码
+
+        Returns:
+            转换后的 Series，转换失败时返回 None
+        """
+        try:
+            non_null_values = series[non_null_mask]
+
+            if non_null_values.apply(lambda x: isinstance(x, (int, float, np.integer, np.floating))).all():
+                return pd.to_numeric(series, errors='coerce')
+
+            converted = pd.to_numeric(series, errors='coerce')
+            if converted[non_null_mask].notna().any():
+                return converted
+            return None
+        except (ValueError, TypeError):
+            return None
+
+    def _try_convert_datetime(
+        self,
+        series: pd.Series,
+        non_null_mask: pd.Series
+    ) -> Optional[pd.Series]:
+        """
+        尝试将 Series 转换为日期类型。
+
+        Args:
+            series: 待转换的 Series
+            non_null_mask: 非空值掩码
+
+        Returns:
+            转换后的 Series，转换失败时返回 None
+        """
+        try:
+            non_null_values = series[non_null_mask]
+
+            if non_null_values.apply(lambda x: isinstance(x, (pd.Timestamp, np.datetime64))).all():
+                return pd.to_datetime(series, errors='coerce')
+
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', UserWarning)
+                converted = pd.to_datetime(series, errors='coerce')
+
+            if converted[non_null_mask].notna().any():
+                return converted
+            return None
+        except (ValueError, TypeError):
+            return None
 
     def _validate_params(
         self,
@@ -219,7 +420,8 @@ def sort_dataframe(
     sort_columns: Union[str, List[str]],
     ascending: Union[bool, List[bool]] = True,
     na_position: str = 'last',
-    ignore_index: bool = True
+    ignore_index: bool = True,
+    auto_convert_types: bool = True
 ) -> pd.DataFrame:
     """
     便捷函数：对 DataFrame 进行多列排序。
@@ -230,9 +432,10 @@ def sort_dataframe(
         ascending: 排序方式
         na_position: 缺失值位置
         ignore_index: 是否重置索引
+        auto_convert_types: 是否自动转换混合数据类型列（默认 True）
 
     Returns:
         排序后的 DataFrame
     """
-    sorter = MultiColumnSorter(na_position=na_position)
+    sorter = MultiColumnSorter(na_position=na_position, auto_convert_types=auto_convert_types)
     return sorter.sort(df, sort_columns, ascending, ignore_index, inplace=False)
